@@ -447,9 +447,10 @@ impl SqliteMemory {
             let since_ref = since_owned.as_deref();
             let until_ref = until_owned.as_deref();
 
-            let mut sql = "SELECT id, key, content, category, created_at, session_id FROM memories \
+            let mut sql =
+                "SELECT id, key, content, category, created_at, session_id FROM memories \
                            WHERE 1=1"
-                .to_string();
+                    .to_string();
             let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
             let mut idx = 1;
 
@@ -553,7 +554,9 @@ impl Memory for SqliteMemory {
     ) -> anyhow::Result<Vec<MemoryEntry>> {
         // Time-only query: list by time range when no keywords
         if query.trim().is_empty() {
-            return self.recall_by_time_only(limit, session_id, since, until).await;
+            return self
+                .recall_by_time_only(limit, session_id, since, until)
+                .await;
         }
 
         // Compute query embedding (async, before blocking work)
