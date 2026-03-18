@@ -120,6 +120,27 @@ If a rollout regresses behavior:
 3. confirm recovery via `doctor` and channel health checks
 4. document incident root cause and mitigation
 
+## Service Environment (Linux systemd)
+
+When ZeroClaw runs as a user service, it needs access to user-installed tools (Python, pyenv, conda, etc.). The systemd unit includes:
+
+- **Default PATH**: `~/.local/bin`, `~/.pyenv/shims`, `~/miniconda3/bin`, `~/anaconda3/bin`, plus `/usr/local/bin`, `/usr/bin`, `/bin`
+- **Optional env file**: `~/.zeroclaw/zeroclaw.env` — if present, each line `KEY=VAL` is loaded and overrides the default. Use this for custom PATH or other variables.
+
+Example `~/.zeroclaw/zeroclaw.env`:
+
+```bash
+# Custom PATH (override default)
+PATH=/home/me/.local/bin:/home/me/.venv/bin:/usr/local/bin:/usr/bin:/bin
+
+# Extra vars passed to shell tool (see autonomy.shell_env_passthrough in config)
+# DATABASE_URL=...
+```
+
+After creating or editing `zeroclaw.env`, run `zeroclaw service restart` to apply.
+
+**macOS launchd**: The plist does not support an env file. To pass custom env, either run `zeroclaw daemon` in a terminal with the desired environment, or use a wrapper script that sources your env and execs zeroclaw.
+
 ## Related Docs
 
 - [one-click-bootstrap.md](../setup-guides/one-click-bootstrap.md)

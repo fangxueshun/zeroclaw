@@ -120,6 +120,27 @@ zeroclaw service start
 3. 通过 `doctor` 和渠道健康检查确认恢复
 4. 记录事件根本原因和缓解措施
 
+## 服务环境（Linux systemd）
+
+以用户服务运行时，ZeroClaw 需要访问用户安装的工具（Python、pyenv、conda 等）。systemd 单元包含：
+
+- **默认 PATH**：`~/.local/bin`、`~/.pyenv/shims`、`~/miniconda3/bin`、`~/anaconda3/bin`，以及 `/usr/local/bin`、`/usr/bin`、`/bin`
+- **可选 env 文件**：`~/.zeroclaw/zeroclaw.env` — 若存在，每行 `KEY=VAL` 会被加载并覆盖默认值。用于自定义 PATH 或其他变量。
+
+`~/.zeroclaw/zeroclaw.env` 示例：
+
+```bash
+# 自定义 PATH（覆盖默认）
+PATH=/home/me/.local/bin:/home/me/.venv/bin:/usr/local/bin:/usr/bin:/bin
+
+# 传递给 shell 工具的额外变量（见配置中的 autonomy.shell_env_passthrough）
+# DATABASE_URL=...
+```
+
+创建或修改 `zeroclaw.env` 后，执行 `zeroclaw service restart` 使配置生效。
+
+**macOS launchd**：plist 不支持 env 文件。要传入自定义环境，可在终端中运行 `zeroclaw daemon`（带上所需环境），或使用包装脚本先 source 环境再 exec zeroclaw。
+
 ## 相关文档
 
 - [one-click-bootstrap.zh-CN.md](../setup-guides/one-click-bootstrap.zh-CN.md)

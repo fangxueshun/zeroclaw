@@ -2350,11 +2350,19 @@ async fn process_channel_message(
                     }
                 }
             } else {
-                eprintln!(
-                    "  ❌ LLM error after {}ms: {e}",
-                    started_at.elapsed().as_millis()
-                );
+                let elapsed_ms = started_at.elapsed().as_millis();
                 let safe_error = providers::sanitize_api_error(&e.to_string());
+                eprintln!("  ❌ LLM error after {elapsed_ms}ms: {e}");
+                tracing::error!(
+                    channel = %msg.channel,
+                    sender = %msg.sender,
+                    provider = %route.provider,
+                    model = %route.model,
+                    elapsed_ms = %elapsed_ms,
+                    error = %e,
+                    sanitized = %safe_error,
+                    "Task failed — LLM error"
+                );
                 runtime_trace::record_event(
                     "channel_message_error",
                     Some(msg.channel.as_str()),
@@ -2384,22 +2392,39 @@ async fn process_channel_message(
                     );
                 }
                 if let Some(channel) = target_channel.as_ref() {
+                    let error_text = format!("⚠️ Error: {e}");
                     if let Some(ref draft_id) = draft_message_id {
-                        let _ = channel
-                            .finalize_draft(&msg.reply_target, draft_id, &format!("⚠️ Error: {e}"))
-                            .await;
-                    } else {
-                        let _ = channel
-                            .send(
-                                &SendMessage::new(format!("⚠️ Error: {e}"), &msg.reply_target)
-                                    .in_thread(msg.thread_ts.clone()),
-                            )
-                            .await;
+                        if let Err(send_err) = channel
+                            .finalize_draft(&msg.reply_target, draft_id, &error_text)
+                            .await
+                        {
+                            tracing::warn!(
+                                channel = %channel.name(),
+                                "Failed to send error to channel: {send_err}"
+                            );
+                        }
+                    } else if let Err(send_err) = channel
+                        .send(
+                            &SendMessage::new(error_text, &msg.reply_target)
+                                .in_thread(msg.thread_ts.clone()),
+                        )
+                        .await
+                    {
+                        tracing::warn!(
+                            channel = %channel.name(),
+                            "Failed to send error to channel: {send_err}"
+                        );
                     }
+                } else {
+                    tracing::warn!(
+                        channel = %msg.channel,
+                        "No target channel — user may not have received error notification"
+                    );
                 }
             }
         }
         LlmExecutionResult::Completed(Err(_)) => {
+            let elapsed_ms = started_at.elapsed().as_millis();
             let timeout_msg = format!(
                 "LLM response timed out after {}s (base={}s, max_tool_iterations={})",
                 timeout_budget_secs, ctx.message_timeout_secs, ctx.max_tool_iterations
@@ -2414,13 +2439,18 @@ async fn process_channel_message(
                 Some(&timeout_msg),
                 serde_json::json!({
                     "sender": msg.sender,
-                    "elapsed_ms": started_at.elapsed().as_millis(),
+                    "elapsed_ms": elapsed_ms,
                 }),
             );
-            eprintln!(
-                "  ❌ {} (elapsed: {}ms)",
-                timeout_msg,
-                started_at.elapsed().as_millis()
+            eprintln!("  ❌ {timeout_msg} (elapsed: {elapsed_ms}ms)");
+            tracing::error!(
+                channel = %msg.channel,
+                sender = %msg.sender,
+                provider = %route.provider,
+                model = %route.model,
+                elapsed_ms = %elapsed_ms,
+                %timeout_msg,
+                "Task failed — LLM timeout"
             );
             // Close the orphan user turn so subsequent messages don't
             // inherit this timed-out request as unfinished context.

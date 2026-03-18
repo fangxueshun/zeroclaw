@@ -453,6 +453,12 @@ fn install_linux_systemd(config: &Config) -> Result<()> {
          RestartSec=3\n\
          # Ensure HOME is set so headless browsers can create profile/cache dirs.\n\
          Environment=HOME=%h\n\
+         # Default PATH includes user-installed tools (Python, pyenv, etc.).\n\
+         # Override via ~/.zeroclaw/zeroclaw.env if needed.\n\
+         Environment=PATH=%h/.local/bin:%h/.pyenv/shims:%h/miniconda3/bin:%h/anaconda3/bin:/usr/local/bin:/usr/bin:/bin\n\
+         # Optional: load extra env vars from ~/.zeroclaw/zeroclaw.env (KEY=VAL per line).\n\
+         # Leading dash means missing file is OK.\n\
+         EnvironmentFile=-%h/.zeroclaw/zeroclaw.env\n\
          # Allow inheriting DISPLAY and XDG_RUNTIME_DIR from the user session\n\
          # so graphical/headless browsers can function correctly.\n\
          PassEnvironment=DISPLAY XDG_RUNTIME_DIR\n\
@@ -467,6 +473,7 @@ fn install_linux_systemd(config: &Config) -> Result<()> {
     let _ = run_checked(Command::new("systemctl").args(["--user", "enable", "zeroclaw.service"]));
     println!("✅ Installed systemd user service: {}", file.display());
     println!("   Start with: zeroclaw service start");
+    println!("   For Python/user tools: add PATH etc. to ~/.zeroclaw/zeroclaw.env");
     Ok(())
 }
 
@@ -1263,6 +1270,12 @@ mod tests {
              RestartSec=3\n\
              # Ensure HOME is set so headless browsers can create profile/cache dirs.\n\
              Environment=HOME=%h\n\
+             # Default PATH includes user-installed tools (Python, pyenv, etc.).\n\
+             # Override via ~/.zeroclaw/zeroclaw.env if needed.\n\
+             Environment=PATH=%h/.local/bin:%h/.pyenv/shims:%h/miniconda3/bin:%h/anaconda3/bin:/usr/local/bin:/usr/bin:/bin\n\
+             # Optional: load extra env vars from ~/.zeroclaw/zeroclaw.env (KEY=VAL per line).\n\
+             # Leading dash means missing file is OK.\n\
+             EnvironmentFile=-%h/.zeroclaw/zeroclaw.env\n\
              # Allow inheriting DISPLAY and XDG_RUNTIME_DIR from the user session\n\
              # so graphical/headless browsers can function correctly.\n\
              PassEnvironment=DISPLAY XDG_RUNTIME_DIR\n\
@@ -1274,6 +1287,10 @@ mod tests {
         assert!(
             unit.contains("Environment=HOME=%h"),
             "systemd unit must set HOME for headless browser support"
+        );
+        assert!(
+            unit.contains("EnvironmentFile=-%h/.zeroclaw/zeroclaw.env"),
+            "systemd unit must support optional env file for user tools"
         );
         assert!(
             unit.contains("PassEnvironment=DISPLAY XDG_RUNTIME_DIR"),
