@@ -1,11 +1,9 @@
-//! DingTalk Outgoing channel — HTTP callback mode for receiving @ mentions.
+//! DingTalk Outgoing channel — custom bot HTTP callback + sessionWebhook reply.
 //!
-//! Configure `sign_token`, `outgoing_token` (EncodingAESKey), and set the callback URL
-//! in DingTalk open platform to `http://<public_ip>:<port>/dingtalk-outgoing`.
-//! Use `curl cip.cc` to get your public IP.
-//!
-//! Differs from the Stream Mode dingtalk channel: this uses HTTP webhook only,
-//! no client_id/client_secret or WebSocket.
+//! Flow: open.dingtalk.com/document/dingstart/custom-bot-to-send-group-chat-messages
+//! 1. Create custom bot (群设置 → 智能群助手 → 添加机器人 → 自定义)
+//! 2. Enable Outgoing in security settings; set sign_token, outgoing_token, POST URL
+//! 3. ZeroClaw receives callback, replies via sessionWebhook
 
 use super::traits::{Channel, ChannelMessage, SendMessage};
 use async_trait::async_trait;
@@ -25,11 +23,7 @@ pub struct DingTalkOutgoingChannel {
 }
 
 impl DingTalkOutgoingChannel {
-    pub fn new(
-        sign_token: String,
-        encoding_aes_key: String,
-        allowed_users: Vec<String>,
-    ) -> Self {
+    pub fn new(sign_token: String, encoding_aes_key: String, allowed_users: Vec<String>) -> Self {
         Self {
             sign_token,
             encoding_aes_key,
@@ -70,8 +64,9 @@ impl DingTalkOutgoingChannel {
     /// AES-256-CBC: key=first 16 bytes, iv=last 16 bytes of decoded key.
     /// Plaintext format: random(16) + msg_len(4, big-endian) + msg + corpid
     pub fn decrypt_message(aes_key_b64: &str, encrypt: &str) -> anyhow::Result<String> {
-        use aes::cipher::{block_pad::Pkcs7, BlockDecryptMut, KeyIvInit};
+        use aes::cipher::{block_padding::Pkcs7, BlockDecryptMut, KeyIvInit};
         use aes::Aes256;
+        use base64::Engine;
 
         type Aes256CbcDec = cbc::Decryptor<Aes256>;
 
@@ -80,12 +75,14 @@ impl DingTalkOutgoingChannel {
         } else {
             format!("{}=", aes_key_b64)
         };
-        use base64::Engine;
         let key_bytes = base64::engine::general_purpose::STANDARD
             .decode(&key_b64)
             .map_err(|e| anyhow::anyhow!("Invalid EncodingAESKey base64: {e}"))?;
         if key_bytes.len() != 32 {
-            anyhow::bail!("EncodingAESKey must decode to 32 bytes, got {}", key_bytes.len());
+            anyhow::bail!(
+                "EncodingAESKey must decode to 32 bytes, got {}",
+                key_bytes.len()
+            );
         }
 
         let ciphertext = base64::engine::general_purpose::STANDARD
@@ -114,8 +111,9 @@ impl DingTalkOutgoingChannel {
 
     /// Encrypt a message for DingTalk callback response.
     pub fn encrypt_message(aes_key_b64: &str, plaintext: &str) -> anyhow::Result<String> {
-        use aes::cipher::{block_pad::Pkcs7, BlockEncryptMut, KeyIvInit};
+        use aes::cipher::{block_padding::Pkcs7, BlockEncryptMut, KeyIvInit};
         use aes::Aes256;
+        use base64::Engine;
 
         type Aes256CbcEnc = cbc::Encryptor<Aes256>;
 
@@ -124,12 +122,14 @@ impl DingTalkOutgoingChannel {
         } else {
             format!("{}=", aes_key_b64)
         };
-        use base64::Engine;
         let key_bytes = base64::engine::general_purpose::STANDARD
             .decode(&key_b64)
             .map_err(|e| anyhow::anyhow!("Invalid EncodingAESKey base64: {e}"))?;
         if key_bytes.len() != 32 {
-            anyhow::bail!("EncodingAESKey must decode to 32 bytes, got {}", key_bytes.len());
+            anyhow::bail!(
+                "EncodingAESKey must decode to 32 bytes, got {}",
+                key_bytes.len()
+            );
         }
 
         let mut to_encrypt = Vec::with_capacity(16 + 4 + plaintext.len());
@@ -142,11 +142,10 @@ impl DingTalkOutgoingChannel {
             .map_err(|e| anyhow::anyhow!("AES init error: {e}"))?;
         let encrypted = cipher.encrypt_padded_vec_mut::<Pkcs7>(&to_encrypt);
 
-        use base64::Engine;
         Ok(base64::engine::general_purpose::STANDARD.encode(encrypted))
     }
 
-    /// Parse decrypted JSON and extract ChannelMessage(s) from chatbot callback.
+    /// Parse decrypted JSON (encrypted callback format: EventType, msgInfo).
     pub fn parse_callback_json(&self, decrypted: &str) -> Vec<ChannelMessage> {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(decrypted) else {
             return vec![];
@@ -171,6 +170,52 @@ impl DingTalkOutgoingChannel {
             None => return vec![],
         };
 
+        self.extract_message_from_payload(msg_info)
+    }
+
+    /// Parse plain JSON (HTTP mode per dingstart robot-receive-message doc).
+    /// Format: text.content or content, sessionWebhook, senderStaffId or senderId, conversationId.
+    pub fn parse_plain_callback_json(&self, payload: &serde_json::Value) -> Vec<ChannelMessage> {
+        let content = payload
+            .get("text")
+            .and_then(|t| t.get("content"))
+            .and_then(|c| c.as_str())
+            .or_else(|| payload.get("content").and_then(|c| c.as_str()))
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default();
+        if content.is_empty() {
+            return vec![];
+        }
+
+        let sender_id = payload
+            .get("senderStaffId")
+            .and_then(|s| s.as_str())
+            .or_else(|| payload.get("senderId").and_then(|s| s.as_str()))
+            .unwrap_or("unknown");
+
+        if !self.is_user_allowed(sender_id) {
+            tracing::warn!(
+                "DingTalk outgoing: ignoring message from unauthorized user: {sender_id}"
+            );
+            return vec![];
+        }
+
+        let session_webhook = payload
+            .get("sessionWebhook")
+            .and_then(|w| w.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        let conversation_id = payload
+            .get("conversationId")
+            .and_then(|c| c.as_str())
+            .unwrap_or(sender_id)
+            .to_string();
+
+        self.build_channel_message(sender_id, &conversation_id, &session_webhook, &content)
+    }
+
+    fn extract_message_from_payload(&self, msg_info: &serde_json::Value) -> Vec<ChannelMessage> {
         let content = msg_info
             .get("content")
             .and_then(|c| c.as_str())
@@ -204,17 +249,26 @@ impl DingTalkOutgoingChannel {
             .unwrap_or(sender_id)
             .to_string();
 
+        self.build_channel_message(sender_id, &conversation_id, &session_webhook, &content)
+    }
+
+    fn build_channel_message(
+        &self,
+        sender_id: &str,
+        conversation_id: &str,
+        session_webhook: &str,
+        content: &str,
+    ) -> Vec<ChannelMessage> {
         let reply_target = if session_webhook.is_empty() {
             sender_id.to_string()
         } else {
-            conversation_id.clone()
+            conversation_id.to_string()
         };
 
-        // Store session webhook for sending
         if !session_webhook.is_empty() {
             if let Ok(mut webhooks) = self.session_webhooks.write() {
-                webhooks.insert(reply_target.clone(), session_webhook.clone());
-                webhooks.insert(sender_id.to_string(), session_webhook);
+                webhooks.insert(reply_target.clone(), session_webhook.to_string());
+                webhooks.insert(sender_id.to_string(), session_webhook.to_string());
             }
         }
 
@@ -222,7 +276,7 @@ impl DingTalkOutgoingChannel {
             id: Uuid::new_v4().to_string(),
             sender: sender_id.to_string(),
             reply_target,
-            content,
+            content: content.to_string(),
             channel: "dingtalk_outgoing".to_string(),
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -237,7 +291,10 @@ fn constant_time_compare(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }
-    a.iter().zip(b.iter()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+    a.iter()
+        .zip(b.iter())
+        .fold(0u8, |acc, (x, y)| acc | (x ^ y))
+        == 0
 }
 
 #[async_trait]
@@ -247,13 +304,21 @@ impl Channel for DingTalkOutgoingChannel {
     }
 
     async fn send(&self, message: &SendMessage) -> anyhow::Result<()> {
-        let webhooks = self.session_webhooks.read().await;
-        let webhook_url = webhooks.get(&message.recipient).ok_or_else(|| {
-            anyhow::anyhow!(
-                "No session webhook for {}. User must send a message first to establish session.",
-                message.recipient
-            )
-        })?;
+        let webhook_url = {
+            let webhooks = self
+                .session_webhooks
+                .read()
+                .map_err(|e| anyhow::anyhow!("RwLock poisoned: {e}"))?;
+            webhooks
+                .get(&message.recipient)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "No session webhook for {}. User must send a message first to establish session.",
+                        message.recipient
+                    )
+                })?
+                .clone()
+        };
 
         let title = message.subject.as_deref().unwrap_or("ZeroClaw");
         let body = serde_json::json!({

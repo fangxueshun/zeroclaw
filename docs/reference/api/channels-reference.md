@@ -380,17 +380,29 @@ allowed_users = ["*"]
 
 ### 4.14a DingTalk Outgoing (HTTP callback)
 
-Simpler setup: configure `sign_token`, `outgoing_token` (EncodingAESKey), then set the callback URL in DingTalk open platform to `http://<public_ip>:<port>/dingtalk-outgoing`. Use `curl cip.cc` to get your public IP.
+基于钉钉**自定义机器人**的 Outgoing 机制接入，@ 机器人后通过 `sessionWebhook` 发送群聊消息。完整流程见 [自定义机器人发送群聊消息](https://open.dingtalk.com/document/dingstart/custom-bot-to-send-group-chat-messages)。
+
+**钉钉侧配置（按文档流程）：**
+
+1. **创建机器人**：[自定义机器人的创建和安装](https://open.dingtalk.com/document/dingstart/custom-bot-creation-and-installation) — 群设置 → 智能群助手 → 添加机器人 → 自定义
+2. **安全设置**：[自定义机器人安全设置](https://open.dingtalk.com/document/dingstart/customize-robot-security-settings) — 开启 Outgoing 机制，填写：
+   - **签名 Token**：3–32 字符，用于校验回调
+   - **Outgoing Token（EncodingAESKey）**：43 位，用于加解密（若使用加密回调）
+   - **POST 回调地址**：`http://<公网IP>:<端口>/dingtalk-outgoing`  
+     公网 IP 用 `curl cip.cc` 获取，端口为 ZeroClaw gateway 暴露端口
+3. **接收与发送**：钉钉将消息回调到上述地址，ZeroClaw 使用回调中的 `sessionWebhook` 发送回复，见 [机器人接收消息](https://open.dingtalk.com/document/dingstart/dingstart-robot-receive-message)、[自定义机器人发送群聊消息](https://open.dingtalk.com/document/dingstart/custom-bot-to-send-group-chat-messages)
+
+**ZeroClaw 配置：**
 
 ```toml
 [channels_config.dingtalk_outgoing]
-sign_token = "your-3-to-32-char-token"
-outgoing_token = "your-43-char-encoding-aes-key"
+sign_token = "钉钉后台的签名Token"
+outgoing_token = "钉钉后台的EncodingAESKey/OutgoingToken"
 allowed_users = ["*"]
 ```
 
-- Inbound: `GET /dingtalk-outgoing` (URL verification), `POST /dingtalk-outgoing` (message callback).
-- @ mention the bot in chat to trigger conversations.
+- 端点：`GET /dingtalk-outgoing`（URL 验证）、`POST /dingtalk-outgoing`（消息回调）
+- 支持加密回调和明文 JSON 两种格式，自动识别
 
 ### 4.15 QQ
 

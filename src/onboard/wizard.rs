@@ -1,8 +1,8 @@
 #[cfg(feature = "channel-nostr")]
 use crate::config::schema::{default_nostr_relays, NostrConfig};
 use crate::config::schema::{
-    DingTalkConfig, IrcConfig, LarkReceiveMode, LinqConfig, NextcloudTalkConfig, QQConfig,
-    SignalConfig, StreamMode, WhatsAppConfig,
+    DingTalkConfig, DingTalkOutgoingConfig, IrcConfig, LarkReceiveMode, LinqConfig,
+    NextcloudTalkConfig, QQConfig, SignalConfig, StreamMode, WhatsAppConfig,
 };
 use crate::config::{
     AutonomyConfig, BrowserConfig, ChannelsConfig, ComposioConfig, Config, DiscordConfig,
@@ -3383,6 +3383,7 @@ enum ChannelMenuChoice {
     Webhook,
     NextcloudTalk,
     DingTalk,
+    DingTalkBot,
     QqOfficial,
     Lark,
     Feishu,
@@ -3404,6 +3405,7 @@ const CHANNEL_MENU_CHOICES: &[ChannelMenuChoice] = &[
     ChannelMenuChoice::Webhook,
     ChannelMenuChoice::NextcloudTalk,
     ChannelMenuChoice::DingTalk,
+    ChannelMenuChoice::DingTalkBot,
     ChannelMenuChoice::QqOfficial,
     ChannelMenuChoice::Lark,
     ChannelMenuChoice::Feishu,
@@ -3522,7 +3524,15 @@ fn setup_channels() -> Result<ChannelsConfig> {
                     if config.dingtalk.is_some() {
                         "✅ connected"
                     } else {
-                        "— DingTalk Stream Mode"
+                        "— DingTalk Stream Mode (企业机器人)"
+                    }
+                ),
+                ChannelMenuChoice::DingTalkBot => format!(
+                    "DingTalkBot {}",
+                    if config.dingtalk_outgoing.is_some() {
+                        "✅ connected"
+                    } else {
+                        "— 自定义机器人 (群设置 Outgoing)"
                     }
                 ),
                 ChannelMenuChoice::QqOfficial => format!(
@@ -4749,6 +4759,66 @@ fn setup_channels() -> Result<ChannelsConfig> {
                     client_secret,
                     allowed_users,
                 });
+            }
+            ChannelMenuChoice::DingTalkBot => {
+                // ── DingTalk 自定义机器人 (Outgoing) ──
+                println!();
+                println!(
+                    "  {} {}",
+                    style("DingTalkBot Setup").white().bold(),
+                    style("— 自定义机器人 Outgoing").dim()
+                );
+                print_bullet("1. 群设置 → 智能群助手 → 添加机器人 → 自定义");
+                print_bullet("2. 安全设置中开启 Outgoing 机制");
+                print_bullet("3. 填写签名 Token、Outgoing Token (EncodingAESKey)、POST 回调地址");
+                print_bullet("4. 回调地址填: http://<公网IP>:<端口>/dingtalk-outgoing");
+                print_bullet("   公网 IP 用 curl cip.cc 获取，端口为 ZeroClaw gateway 暴露端口");
+                println!();
+
+                let sign_token: String = Input::new()
+                    .with_prompt("  签名 Token (3–32 字符)")
+                    .interact_text()?;
+
+                if sign_token.trim().is_empty() {
+                    println!("  {} Skipped", style("→").dim());
+                    continue;
+                }
+
+                let outgoing_token: String = Input::new()
+                    .with_prompt("  Outgoing Token / EncodingAESKey (43 位)")
+                    .interact_text()?;
+
+                if outgoing_token.trim().is_empty() {
+                    println!("  {} Skipped", style("→").dim());
+                    continue;
+                }
+
+                let users_str: String = Input::new()
+                    .with_prompt("  允许的用户 ID (逗号分隔，'*' 表示全部)")
+                    .allow_empty(true)
+                    .interact_text()?;
+
+                let allowed_users: Vec<String> = if users_str.trim() == "*" {
+                    vec!["*".into()]
+                } else {
+                    users_str
+                        .split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect()
+                };
+
+                config.dingtalk_outgoing = Some(DingTalkOutgoingConfig {
+                    sign_token: sign_token.trim().to_string(),
+                    outgoing_token: outgoing_token.trim().to_string(),
+                    allowed_users: if allowed_users.is_empty() {
+                        vec!["*".into()]
+                    } else {
+                        allowed_users
+                    },
+                });
+
+                println!("  {} DingTalkBot configured", style("✅").green().bold());
             }
             ChannelMenuChoice::QqOfficial => {
                 // ── QQ Official ──
@@ -7212,6 +7282,7 @@ mod tests {
     fn channel_menu_choices_include_signal_nextcloud_lark_and_feishu() {
         assert!(channel_menu_choices().contains(&ChannelMenuChoice::Signal));
         assert!(channel_menu_choices().contains(&ChannelMenuChoice::NextcloudTalk));
+        assert!(channel_menu_choices().contains(&ChannelMenuChoice::DingTalkBot));
         assert!(channel_menu_choices().contains(&ChannelMenuChoice::Lark));
         assert!(channel_menu_choices().contains(&ChannelMenuChoice::Feishu));
     }

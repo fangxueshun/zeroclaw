@@ -516,8 +516,11 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         });
 
     // DingTalk Outgoing channel (if configured)
-    let dingtalk_outgoing_channel: Option<Arc<DingTalkOutgoingChannel>> =
-        config.channels_config.dingtalk_outgoing.as_ref().map(|dto| {
+    let dingtalk_outgoing_channel: Option<Arc<DingTalkOutgoingChannel>> = config
+        .channels_config
+        .dingtalk_outgoing
+        .as_ref()
+        .map(|dto| {
             Arc::new(DingTalkOutgoingChannel::new(
                 dto.sign_token.clone(),
                 dto.outgoing_token.clone(),
@@ -1405,7 +1408,10 @@ async fn handle_dingtalk_outgoing_verify(
     Query(q): Query<DingTalkOutgoingQuery>,
 ) -> impl IntoResponse {
     let Some(ref dto) = state.dingtalk_outgoing else {
-        return (StatusCode::NOT_FOUND, "DingTalk outgoing not configured".to_string());
+        return (
+            StatusCode::NOT_FOUND,
+            "DingTalk outgoing not configured".to_string(),
+        );
     };
 
     let (signature, timestamp, nonce, echostr) = match (
@@ -1417,16 +1423,14 @@ async fn handle_dingtalk_outgoing_verify(
         (Some(s), Some(t), Some(n), Some(e)) => (s, t, n, e),
         _ => {
             tracing::warn!("DingTalk outgoing: missing verify params");
-            return (StatusCode::BAD_REQUEST, "Missing signature/timestamp/nonce/echostr".to_string());
+            return (
+                StatusCode::BAD_REQUEST,
+                "Missing signature/timestamp/nonce/echostr".to_string(),
+            );
         }
     };
 
-    if !DingTalkOutgoingChannel::verify_signature(
-        dto.sign_token(),
-        timestamp,
-        nonce,
-        signature,
-    ) {
+    if !DingTalkOutgoingChannel::verify_signature(dto.sign_token(), timestamp, nonce, signature) {
         tracing::warn!("DingTalk outgoing: signature verification failed");
         return (StatusCode::UNAUTHORIZED, "Invalid signature".to_string());
     }
@@ -1456,31 +1460,19 @@ async fn handle_dingtalk_outgoing_webhook(
         );
     };
 
-    let (signature, timestamp, nonce) = match (
+    // Verify signature when present (encrypted callback always has it; plain HTTP mode may not)
+    if let (Some(s), Some(t), Some(n)) = (
         q.signature.as_deref(),
         q.timestamp.as_deref(),
         q.nonce.as_deref(),
     ) {
-        (Some(s), Some(t), Some(n)) => (s, t, n),
-        _ => {
+        if !DingTalkOutgoingChannel::verify_signature(dto.sign_token(), t, n, s) {
+            tracing::warn!("DingTalk outgoing: POST signature verification failed");
             return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Missing signature/timestamp/nonce"})),
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error": "Invalid signature"})),
             );
         }
-    };
-
-    if !DingTalkOutgoingChannel::verify_signature(
-        dto.sign_token(),
-        timestamp,
-        nonce,
-        signature,
-    ) {
-        tracing::warn!("DingTalk outgoing: POST signature verification failed");
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(serde_json::json!({"error": "Invalid signature"})),
-        );
     }
 
     let Ok(payload) = serde_json::from_slice::<serde_json::Value>(&body) else {
@@ -1490,44 +1482,54 @@ async fn handle_dingtalk_outgoing_webhook(
         );
     };
 
-    let Some(encrypt) = payload.get("encrypt").and_then(|v| v.as_str()) else {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "Missing encrypt field"})),
-        );
-    };
-
-    let decrypted = match DingTalkOutgoingChannel::decrypt_message(dto.encoding_aes_key(), encrypt) {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::warn!("DingTalk outgoing: decrypt failed: {e}");
+    // Support both: encrypted callback (encrypt field) and plain JSON (HTTP mode per dingstart doc)
+    let (messages, use_encrypted_response) =
+        if let Some(encrypt) = payload.get("encrypt").and_then(|v| v.as_str()) {
+            let decrypted =
+                match DingTalkOutgoingChannel::decrypt_message(dto.encoding_aes_key(), encrypt) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::warn!("DingTalk outgoing: decrypt failed: {e}");
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            Json(serde_json::json!({"error": "Decrypt failed"})),
+                        );
+                    }
+                };
+            (dto.parse_callback_json(&decrypted), true)
+        } else if payload.get("sessionWebhook").is_some() {
+            // Plain JSON format (open.dingtalk.com/document/dingstart/dingstart-robot-receive-message)
+            (dto.parse_plain_callback_json(&payload), false)
+        } else {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Decrypt failed"})),
+                Json(serde_json::json!({"error": "Missing encrypt or sessionWebhook"})),
             );
-        }
-    };
-
-    let messages = dto.parse_callback_json(&decrypted);
+        };
 
     if messages.is_empty() {
-        // URL verification or unsupported event — return encrypted "success"
-        let encrypted_success = match DingTalkOutgoingChannel::encrypt_message(
-            dto.encoding_aes_key(),
-            "success",
-        ) {
-            Ok(e) => e,
-            Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({}))),
-        };
-        return (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "msg_signature": "",
-                "timeStamp": q.timestamp.unwrap_or_default(),
-                "nonce": q.nonce.unwrap_or_default(),
-                "encrypt": encrypted_success,
-            })),
-        );
+        if use_encrypted_response {
+            let encrypted_success =
+                match DingTalkOutgoingChannel::encrypt_message(dto.encoding_aes_key(), "success") {
+                    Ok(e) => e,
+                    Err(_) => {
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(serde_json::json!({})),
+                        )
+                    }
+                };
+            return (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "msg_signature": "",
+                    "timeStamp": q.timestamp.unwrap_or_default(),
+                    "nonce": q.nonce.unwrap_or_default(),
+                    "encrypt": encrypted_success,
+                })),
+            );
+        }
+        return (StatusCode::OK, Json(serde_json::json!({})));
     }
 
     for msg in &messages {
@@ -1566,23 +1568,29 @@ async fn handle_dingtalk_outgoing_webhook(
         }
     }
 
-    // Return encrypted "success" as DingTalk expects
-    let encrypted_success = match DingTalkOutgoingChannel::encrypt_message(
-        &dto.outgoing_token,
-        "success",
-    ) {
-        Ok(e) => e,
-        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({}))),
-    };
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({
-            "msg_signature": "",
-            "timeStamp": q.timestamp.unwrap_or_default(),
-            "nonce": q.nonce.unwrap_or_default(),
-            "encrypt": encrypted_success,
-        })),
-    )
+    if use_encrypted_response {
+        let encrypted_success =
+            match DingTalkOutgoingChannel::encrypt_message(dto.encoding_aes_key(), "success") {
+                Ok(e) => e,
+                Err(_) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(serde_json::json!({})),
+                    )
+                }
+            };
+        (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "msg_signature": "",
+                "timeStamp": q.timestamp.unwrap_or_default(),
+                "nonce": q.nonce.unwrap_or_default(),
+                "encrypt": encrypted_success,
+            })),
+        )
+    } else {
+        (StatusCode::OK, Json(serde_json::json!({})))
+    }
 }
 
 /// GET /wati — WATI webhook verification (echoes hub.challenge)
