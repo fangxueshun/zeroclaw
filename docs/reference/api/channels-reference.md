@@ -378,6 +378,20 @@ client_secret = "ding-app-secret"
 allowed_users = ["*"]
 ```
 
+### 4.14a DingTalk Outgoing (HTTP callback)
+
+Simpler setup: configure `sign_token`, `outgoing_token` (EncodingAESKey), then set the callback URL in DingTalk open platform to `http://<public_ip>:<port>/dingtalk-outgoing`. Use `curl cip.cc` to get your public IP.
+
+```toml
+[channels_config.dingtalk_outgoing]
+sign_token = "your-3-to-32-char-token"
+outgoing_token = "your-43-char-encoding-aes-key"
+allowed_users = ["*"]
+```
+
+- Inbound: `GET /dingtalk-outgoing` (URL verification), `POST /dingtalk-outgoing` (message callback).
+- @ mention the bot in chat to trigger conversations.
+
 ### 4.15 QQ
 
 ```toml

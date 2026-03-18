@@ -14,7 +14,8 @@ pub mod static_files;
 pub mod ws;
 
 use crate::channels::{
-    Channel, LinqChannel, NextcloudTalkChannel, SendMessage, WatiChannel, WhatsAppChannel,
+    Channel, DingTalkOutgoingChannel, LinqChannel, NextcloudTalkChannel, SendMessage, WatiChannel,
+    WhatsAppChannel,
 };
 use crate::config::Config;
 use crate::cost::CostTracker;
@@ -303,6 +304,7 @@ pub struct AppState {
     /// Nextcloud Talk webhook secret for signature verification
     pub nextcloud_talk_webhook_secret: Option<Arc<str>>,
     pub wati: Option<Arc<WatiChannel>>,
+    pub dingtalk_outgoing: Option<Arc<DingTalkOutgoingChannel>>,
     /// Observability backend for metrics scraping
     pub observer: Arc<dyn crate::observability::Observer>,
     /// Registered tool specs (for web dashboard tools page)
@@ -513,6 +515,16 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
             ))
         });
 
+    // DingTalk Outgoing channel (if configured)
+    let dingtalk_outgoing_channel: Option<Arc<DingTalkOutgoingChannel>> =
+        config.channels_config.dingtalk_outgoing.as_ref().map(|dto| {
+            Arc::new(DingTalkOutgoingChannel::new(
+                dto.sign_token.clone(),
+                dto.outgoing_token.clone(),
+                dto.allowed_users.clone(),
+            ))
+        });
+
     // Nextcloud Talk webhook secret for signature verification
     // Priority: environment variable > config file
     let nextcloud_talk_webhook_secret: Option<Arc<str>> =
@@ -599,6 +611,10 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
     if nextcloud_talk_channel.is_some() {
         println!("  POST /nextcloud-talk — Nextcloud Talk bot webhook");
     }
+    if dingtalk_outgoing_channel.is_some() {
+        println!("  GET  /dingtalk-outgoing — DingTalk callback URL verification");
+        println!("  POST /dingtalk-outgoing — DingTalk @ mention webhook");
+    }
     println!("  GET  /api/*     — REST API (bearer token required)");
     println!("  GET  /ws/chat   — WebSocket agent chat");
     if config.nodes.enabled {
@@ -658,6 +674,7 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         nextcloud_talk: nextcloud_talk_channel,
         nextcloud_talk_webhook_secret,
         wati: wati_channel,
+        dingtalk_outgoing: dingtalk_outgoing_channel,
         observer: broadcast_observer,
         tools_registry,
         cost_tracker,
@@ -688,6 +705,8 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         .route("/wati", get(handle_wati_verify))
         .route("/wati", post(handle_wati_webhook))
         .route("/nextcloud-talk", post(handle_nextcloud_talk_webhook))
+        .route("/dingtalk-outgoing", get(handle_dingtalk_outgoing_verify))
+        .route("/dingtalk-outgoing", post(handle_dingtalk_outgoing_webhook))
         // ── Web Dashboard API routes ──
         .route("/api/status", get(api::handle_api_status))
         .route("/api/config", get(api::handle_api_config_get))
@@ -1372,6 +1391,200 @@ async fn handle_linq_webhook(
     (StatusCode::OK, Json(serde_json::json!({"status": "ok"})))
 }
 
+#[derive(Debug, serde::Deserialize)]
+struct DingTalkOutgoingQuery {
+    signature: Option<String>,
+    timestamp: Option<String>,
+    nonce: Option<String>,
+    echostr: Option<String>,
+}
+
+/// GET /dingtalk-outgoing — DingTalk callback URL verification
+async fn handle_dingtalk_outgoing_verify(
+    State(state): State<AppState>,
+    Query(q): Query<DingTalkOutgoingQuery>,
+) -> impl IntoResponse {
+    let Some(ref dto) = state.dingtalk_outgoing else {
+        return (StatusCode::NOT_FOUND, "DingTalk outgoing not configured".to_string());
+    };
+
+    let (signature, timestamp, nonce, echostr) = match (
+        q.signature.as_deref(),
+        q.timestamp.as_deref(),
+        q.nonce.as_deref(),
+        q.echostr.as_deref(),
+    ) {
+        (Some(s), Some(t), Some(n), Some(e)) => (s, t, n, e),
+        _ => {
+            tracing::warn!("DingTalk outgoing: missing verify params");
+            return (StatusCode::BAD_REQUEST, "Missing signature/timestamp/nonce/echostr".to_string());
+        }
+    };
+
+    if !DingTalkOutgoingChannel::verify_signature(
+        dto.sign_token(),
+        timestamp,
+        nonce,
+        signature,
+    ) {
+        tracing::warn!("DingTalk outgoing: signature verification failed");
+        return (StatusCode::UNAUTHORIZED, "Invalid signature".to_string());
+    }
+
+    match DingTalkOutgoingChannel::decrypt_message(dto.encoding_aes_key(), echostr) {
+        Ok(plain) => {
+            tracing::info!("DingTalk outgoing: URL verification successful");
+            (StatusCode::OK, plain)
+        }
+        Err(e) => {
+            tracing::warn!("DingTalk outgoing: echostr decrypt failed: {e}");
+            (StatusCode::BAD_REQUEST, "Decrypt failed".to_string())
+        }
+    }
+}
+
+/// POST /dingtalk-outgoing — DingTalk message callback
+async fn handle_dingtalk_outgoing_webhook(
+    State(state): State<AppState>,
+    Query(q): Query<DingTalkOutgoingQuery>,
+    body: Bytes,
+) -> impl IntoResponse {
+    let Some(ref dto) = state.dingtalk_outgoing else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "DingTalk outgoing not configured"})),
+        );
+    };
+
+    let (signature, timestamp, nonce) = match (
+        q.signature.as_deref(),
+        q.timestamp.as_deref(),
+        q.nonce.as_deref(),
+    ) {
+        (Some(s), Some(t), Some(n)) => (s, t, n),
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "Missing signature/timestamp/nonce"})),
+            );
+        }
+    };
+
+    if !DingTalkOutgoingChannel::verify_signature(
+        dto.sign_token(),
+        timestamp,
+        nonce,
+        signature,
+    ) {
+        tracing::warn!("DingTalk outgoing: POST signature verification failed");
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": "Invalid signature"})),
+        );
+    }
+
+    let Ok(payload) = serde_json::from_slice::<serde_json::Value>(&body) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "Invalid JSON"})),
+        );
+    };
+
+    let Some(encrypt) = payload.get("encrypt").and_then(|v| v.as_str()) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "Missing encrypt field"})),
+        );
+    };
+
+    let decrypted = match DingTalkOutgoingChannel::decrypt_message(dto.encoding_aes_key(), encrypt) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!("DingTalk outgoing: decrypt failed: {e}");
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "Decrypt failed"})),
+            );
+        }
+    };
+
+    let messages = dto.parse_callback_json(&decrypted);
+
+    if messages.is_empty() {
+        // URL verification or unsupported event — return encrypted "success"
+        let encrypted_success = match DingTalkOutgoingChannel::encrypt_message(
+            dto.encoding_aes_key(),
+            "success",
+        ) {
+            Ok(e) => e,
+            Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({}))),
+        };
+        return (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "msg_signature": "",
+                "timeStamp": q.timestamp.unwrap_or_default(),
+                "nonce": q.nonce.unwrap_or_default(),
+                "encrypt": encrypted_success,
+            })),
+        );
+    }
+
+    for msg in &messages {
+        tracing::info!(
+            "DingTalk outgoing message from {}: {}",
+            msg.sender,
+            truncate_with_ellipsis(&msg.content, 50)
+        );
+
+        if state.auto_save {
+            let key = format!("dingtalk_outgoing_{}_{}", msg.sender, msg.id);
+            let _ = state
+                .mem
+                .store(&key, &msg.content, MemoryCategory::Conversation, None)
+                .await;
+        }
+
+        match Box::pin(run_gateway_chat_with_tools(&state, &msg.content)).await {
+            Ok(response) => {
+                if let Err(e) = dto
+                    .send(&SendMessage::new(response, &msg.reply_target))
+                    .await
+                {
+                    tracing::error!("Failed to send DingTalk outgoing reply: {e}");
+                }
+            }
+            Err(e) => {
+                tracing::error!("LLM error for DingTalk message: {e:#}");
+                let _ = dto
+                    .send(&SendMessage::new(
+                        "Sorry, I couldn't process your message right now.",
+                        &msg.reply_target,
+                    ))
+                    .await;
+            }
+        }
+    }
+
+    // Return encrypted "success" as DingTalk expects
+    let encrypted_success = match DingTalkOutgoingChannel::encrypt_message(
+        &dto.outgoing_token,
+        "success",
+    ) {
+        Ok(e) => e,
+        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({}))),
+    };
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "msg_signature": "",
+            "timeStamp": q.timestamp.unwrap_or_default(),
+            "nonce": q.nonce.unwrap_or_default(),
+            "encrypt": encrypted_success,
+        })),
+    )
+}
+
 /// GET /wati — WATI webhook verification (echoes hub.challenge)
 async fn handle_wati_verify(
     State(state): State<AppState>,
@@ -1747,6 +1960,7 @@ mod tests {
             nextcloud_talk: None,
             nextcloud_talk_webhook_secret: None,
             wati: None,
+            dingtalk_outgoing: None,
             observer: Arc::new(crate::observability::NoopObserver),
             tools_registry: Arc::new(Vec::new()),
             cost_tracker: None,
@@ -2179,6 +2393,7 @@ mod tests {
             nextcloud_talk: None,
             nextcloud_talk_webhook_secret: None,
             wati: None,
+            dingtalk_outgoing: None,
             observer: Arc::new(crate::observability::NoopObserver),
             tools_registry: Arc::new(Vec::new()),
             cost_tracker: None,
@@ -2245,6 +2460,7 @@ mod tests {
             nextcloud_talk: None,
             nextcloud_talk_webhook_secret: None,
             wati: None,
+            dingtalk_outgoing: None,
             observer: Arc::new(crate::observability::NoopObserver),
             tools_registry: Arc::new(Vec::new()),
             cost_tracker: None,
@@ -2323,6 +2539,7 @@ mod tests {
             nextcloud_talk: None,
             nextcloud_talk_webhook_secret: None,
             wati: None,
+            dingtalk_outgoing: None,
             observer: Arc::new(crate::observability::NoopObserver),
             tools_registry: Arc::new(Vec::new()),
             cost_tracker: None,
@@ -2373,6 +2590,7 @@ mod tests {
             nextcloud_talk: None,
             nextcloud_talk_webhook_secret: None,
             wati: None,
+            dingtalk_outgoing: None,
             observer: Arc::new(crate::observability::NoopObserver),
             tools_registry: Arc::new(Vec::new()),
             cost_tracker: None,
@@ -2428,6 +2646,7 @@ mod tests {
             nextcloud_talk: None,
             nextcloud_talk_webhook_secret: None,
             wati: None,
+            dingtalk_outgoing: None,
             observer: Arc::new(crate::observability::NoopObserver),
             tools_registry: Arc::new(Vec::new()),
             cost_tracker: None,
@@ -2488,6 +2707,7 @@ mod tests {
             nextcloud_talk: None,
             nextcloud_talk_webhook_secret: None,
             wati: None,
+            dingtalk_outgoing: None,
             observer: Arc::new(crate::observability::NoopObserver),
             tools_registry: Arc::new(Vec::new()),
             cost_tracker: None,
@@ -2544,6 +2764,7 @@ mod tests {
             nextcloud_talk: Some(channel),
             nextcloud_talk_webhook_secret: Some(Arc::from(secret)),
             wati: None,
+            dingtalk_outgoing: None,
             observer: Arc::new(crate::observability::NoopObserver),
             tools_registry: Arc::new(Vec::new()),
             cost_tracker: None,

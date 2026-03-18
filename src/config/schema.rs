@@ -23,6 +23,7 @@ const SUPPORTED_PROXY_SERVICE_KEYS: &[&str] = &[
     "provider.openai",
     "provider.openrouter",
     "channel.dingtalk",
+    "channel.dingtalk_outgoing",
     "channel.discord",
     "channel.feishu",
     "channel.lark",
@@ -3559,6 +3560,8 @@ pub struct ChannelsConfig {
     pub feishu: Option<FeishuConfig>,
     /// DingTalk channel configuration.
     pub dingtalk: Option<DingTalkConfig>,
+    /// DingTalk Outgoing (HTTP callback) channel configuration.
+    pub dingtalk_outgoing: Option<DingTalkOutgoingConfig>,
     /// WeCom (WeChat Enterprise) Bot Webhook channel configuration.
     pub wecom: Option<WeComConfig>,
     /// QQ Official Bot channel configuration.
@@ -3659,6 +3662,10 @@ impl ChannelsConfig {
                 self.dingtalk.is_some(),
             ),
             (
+                Box::new(ConfigWrapper::new(self.dingtalk_outgoing.as_ref())),
+                self.dingtalk_outgoing.is_some(),
+            ),
+            (
                 Box::new(ConfigWrapper::new(self.wecom.as_ref())),
                 self.wecom.is_some(),
             ),
@@ -3713,6 +3720,7 @@ impl Default for ChannelsConfig {
             lark: None,
             feishu: None,
             dingtalk: None,
+            dingtalk_outgoing: None,
             wecom: None,
             qq: None,
             #[cfg(feature = "channel-nostr")]
@@ -4690,6 +4698,30 @@ impl ChannelConfig for DingTalkConfig {
     }
     fn desc() -> &'static str {
         "DingTalk Stream Mode"
+    }
+}
+
+/// DingTalk Outgoing (HTTP callback) configuration.
+/// Configure sign_token, outgoing_token (EncodingAESKey), and set the callback URL
+/// in DingTalk open platform to http://&lt;public_ip&gt;:&lt;port&gt;/dingtalk-outgoing.
+/// Use `curl cip.cc` to get your public IP.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct DingTalkOutgoingConfig {
+    /// Token for signature verification (3–32 chars)
+    pub sign_token: String,
+    /// EncodingAESKey (43 chars) for message encryption/decryption
+    pub outgoing_token: String,
+    /// Allowed user IDs (staff IDs). Empty = deny all, "*" = allow all
+    #[serde(default)]
+    pub allowed_users: Vec<String>,
+}
+
+impl ChannelConfig for DingTalkOutgoingConfig {
+    fn name() -> &'static str {
+        "DingTalk Outgoing"
+    }
+    fn desc() -> &'static str {
+        "DingTalk HTTP callback (@ mention in chat)"
     }
 }
 
@@ -5825,6 +5857,18 @@ impl Config {
                     "config.channels_config.dingtalk.client_secret",
                 )?;
             }
+            if let Some(ref mut dto) = config.channels_config.dingtalk_outgoing {
+                decrypt_secret(
+                    &store,
+                    &mut dto.sign_token,
+                    "config.channels_config.dingtalk_outgoing.sign_token",
+                )?;
+                decrypt_secret(
+                    &store,
+                    &mut dto.outgoing_token,
+                    "config.channels_config.dingtalk_outgoing.outgoing_token",
+                )?;
+            }
             if let Some(ref mut wc) = config.channels_config.wecom {
                 decrypt_secret(
                     &store,
@@ -6910,6 +6954,18 @@ impl Config {
                 "config.channels_config.dingtalk.client_secret",
             )?;
         }
+        if let Some(ref mut dto) = config_to_save.channels_config.dingtalk_outgoing {
+            encrypt_secret(
+                &store,
+                &mut dto.sign_token,
+                "config.channels_config.dingtalk_outgoing.sign_token",
+            )?;
+            encrypt_secret(
+                &store,
+                &mut dto.outgoing_token,
+                "config.channels_config.dingtalk_outgoing.outgoing_token",
+            )?;
+        }
         if let Some(ref mut wc) = config_to_save.channels_config.wecom {
             encrypt_secret(
                 &store,
@@ -7386,6 +7442,7 @@ default_temperature = 0.7
                 lark: None,
                 feishu: None,
                 dingtalk: None,
+                dingtalk_outgoing: None,
                 wecom: None,
                 qq: None,
                 #[cfg(feature = "channel-nostr")]
@@ -8119,6 +8176,7 @@ allowed_users = ["@ops:matrix.org"]
             lark: None,
             feishu: None,
             dingtalk: None,
+            dingtalk_outgoing: None,
             wecom: None,
             qq: None,
             nostr: None,
@@ -8347,6 +8405,7 @@ channel_id = "C123"
             lark: None,
             feishu: None,
             dingtalk: None,
+            dingtalk_outgoing: None,
             wecom: None,
             qq: None,
             nostr: None,

@@ -97,6 +97,10 @@ hmac = "0.12"
 sha2 = "0.10"
 hex = "0.4"
 
+# AES for DingTalk outgoing callback decryption
+aes = "0.8"
+cbc = "0.1"
+
 # CSPRNG for secure token generation
 rand = "0.10"
 

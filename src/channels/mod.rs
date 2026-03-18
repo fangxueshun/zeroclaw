@@ -17,6 +17,7 @@
 pub mod clawdtalk;
 pub mod cli;
 pub mod dingtalk;
+pub mod dingtalk_outgoing;
 pub mod discord;
 pub mod email_channel;
 pub mod imessage;
@@ -50,6 +51,7 @@ pub mod whatsapp_web;
 pub use clawdtalk::{ClawdTalkChannel, ClawdTalkConfig};
 pub use cli::CliChannel;
 pub use dingtalk::DingTalkChannel;
+pub use dingtalk_outgoing::DingTalkOutgoingChannel;
 pub use discord::DiscordChannel;
 pub use email_channel::EmailChannel;
 pub use imessage::IMessageChannel;
@@ -3389,6 +3391,17 @@ fn collect_configured_channels(
                 dt.client_id.clone(),
                 dt.client_secret.clone(),
                 dt.allowed_users.clone(),
+            )),
+        });
+    }
+
+    if let Some(ref dto) = config.channels_config.dingtalk_outgoing {
+        channels.push(ConfiguredChannel {
+            display_name: "DingTalk Outgoing",
+            channel: Arc::new(DingTalkOutgoingChannel::new(
+                dto.sign_token.clone(),
+                dto.outgoing_token.clone(),
+                dto.allowed_users.clone(),
             )),
         });
     }
