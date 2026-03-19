@@ -190,10 +190,16 @@ async fn handle_socket(socket: WebSocket, state: AppState, _session_id: Option<S
                 }));
             }
             Err(e) => {
-                let sanitized = crate::providers::sanitize_api_error(&e.to_string());
+                let raw_error = e.to_string();
+                tracing::error!(
+                    raw_api_error = %raw_error,
+                    "WS chat LLM error: {}",
+                    crate::providers::sanitize_api_error(&raw_error)
+                );
+                let message = crate::providers::format_user_facing_llm_error(&raw_error);
                 let err = serde_json::json!({
                     "type": "error",
-                    "message": sanitized,
+                    "message": message,
                 });
                 let _ = sender.send(Message::Text(err.to_string().into())).await;
 
@@ -201,7 +207,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, _session_id: Option<S
                 let _ = state.event_tx.send(serde_json::json!({
                     "type": "error",
                     "component": "ws_chat",
-                    "message": sanitized,
+                    "message": message,
                 }));
             }
         }

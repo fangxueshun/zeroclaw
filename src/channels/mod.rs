@@ -2351,17 +2351,19 @@ async fn process_channel_message(
                 }
             } else {
                 let elapsed_ms = started_at.elapsed().as_millis();
-                let safe_error = providers::sanitize_api_error(&e.to_string());
+                let raw_error = e.to_string();
+                let safe_error = providers::sanitize_api_error(&raw_error);
                 eprintln!("  ❌ LLM error after {elapsed_ms}ms: {e}");
+                // 将原始 API 错误写入日志消息，便于 journalctl/日志排查具体原因
                 tracing::error!(
                     channel = %msg.channel,
                     sender = %msg.sender,
                     provider = %route.provider,
                     model = %route.model,
                     elapsed_ms = %elapsed_ms,
-                    error = %e,
-                    sanitized = %safe_error,
-                    "Task failed — LLM error"
+                    raw_api_error = %raw_error,
+                    "LLM error: {}",
+                    safe_error
                 );
                 runtime_trace::record_event(
                     "channel_message_error",
@@ -2385,10 +2387,10 @@ async fn process_channel_message(
                 if !rolled_back {
                     // Close the orphan user turn so subsequent messages don't
                     // inherit this failed request as unfinished context.
-                    let err_marker = truncate_with_ellipsis(
-                        &format!("ERR: {}", safe_error),
-                        500,
-                    );
+                    // For "Task failed — not continuing" type, use minimal marker
+                    // so the raw API error is not fed back to the LLM.
+                    let err_marker =
+                        providers::minimal_error_marker_for_history(&e.to_string());
                     append_sender_turn(
                         ctx.as_ref(),
                         &history_key,
@@ -2396,7 +2398,9 @@ async fn process_channel_message(
                     );
                 }
                 if let Some(channel) = target_channel.as_ref() {
-                    let error_text = format!("ERR: {}", safe_error);
+                    // Show user-facing message with cause explanation for generic
+                    // "Task failed — not continuing" errors; don't pass raw API text.
+                    let error_text = providers::format_user_facing_llm_error(&e.to_string());
                     if let Some(ref draft_id) = draft_message_id {
                         if let Err(send_err) = channel
                             .finalize_draft(&msg.reply_target, draft_id, &error_text)

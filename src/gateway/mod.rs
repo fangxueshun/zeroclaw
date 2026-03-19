@@ -1067,8 +1067,14 @@ async fn handle_webhook(
         }
         Err(e) => {
             let duration = started_at.elapsed();
-            let sanitized = providers::sanitize_api_error(&e.to_string());
+            let raw_error = e.to_string();
+            let sanitized = providers::sanitize_api_error(&raw_error);
 
+            tracing::error!(
+                raw_api_error = %raw_error,
+                "Webhook LLM error: {}",
+                sanitized
+            );
             state
                 .observer
                 .record_event(&crate::observability::ObserverEvent::LlmResponse {
@@ -1099,7 +1105,12 @@ async fn handle_webhook(
                     cost_usd: None,
                 });
 
-            tracing::error!("Webhook provider error: {}", sanitized);
+            let raw_error = e.to_string();
+            tracing::error!(
+                raw_api_error = %raw_error,
+                "Webhook LLM error: {}",
+                sanitized
+            );
             let err = serde_json::json!({"error": "LLM request failed"});
             (StatusCode::INTERNAL_SERVER_ERROR, Json(err))
         }

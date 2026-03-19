@@ -761,6 +761,128 @@ pub fn scrub_secret_patterns(input: &str) -> String {
     scrubbed
 }
 
+/// Detect "Task failed — not continuing this request" style errors from LLM APIs.
+/// These generic messages should be explained to the user rather than passed through.
+pub fn is_task_failed_not_continuing(raw: &str) -> bool {
+    let lower = raw.to_lowercase();
+    lower.contains("task failed")
+        && (lower.contains("not continuing") || lower.contains("not continue"))
+}
+
+/// Try to infer a specific cause from the error string (API error.code, HTTP status, keywords).
+/// Returns a user-facing Chinese message when the cause can be determined; None otherwise.
+fn try_infer_specific_cause(raw: &str) -> Option<&'static str> {
+    let lower = raw.to_lowercase();
+
+    // 1. Parse JSON error.code if present (OpenAI-style: {"error":{"code":"content_filter",...}})
+    if let Some(json_start) = raw.find('{') {
+        let json_slice = &raw[json_start..];
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(json_slice) {
+            let code = v
+                .get("error")
+                .and_then(|e| e.get("code"))
+                .and_then(|c| c.as_str())
+                .or_else(|| v.get("code").and_then(|c| c.as_str()));
+            if let Some(c) = code {
+                let code_lower = c.to_lowercase();
+                if code_lower.contains("content_filter") || code_lower.contains("content_policy") {
+                    return Some("内容审核未通过");
+                }
+                if code_lower.contains("rate_limit") || code_lower.contains("ratelimit") {
+                    return Some("API 限流");
+                }
+                if code_lower.contains("context_length")
+                    || code_lower.contains("contextlength")
+                    || code_lower.contains("token_limit")
+                {
+                    return Some("上下文或 token 超长");
+                }
+                if code_lower.contains("invalid_request")
+                    || code_lower.contains("invalidrequest")
+                    || code_lower.contains("safety")
+                {
+                    return Some("请求被模型拒绝（安全策略或格式问题）");
+                }
+            }
+        }
+    }
+
+    // 2. HTTP status: 429 -> 限流
+    if lower.contains("429") && (lower.contains("too many") || lower.contains("rate") || lower.contains("limit")) {
+        return Some("API 限流（请求过于频繁）");
+    }
+
+    // 3. Keyword-based inference
+    if lower.contains("content_filter")
+        || lower.contains("content_policy")
+        || lower.contains("content filter")
+        || lower.contains("policy_violation")
+    {
+        return Some("内容审核未通过");
+    }
+    if lower.contains("rate limit")
+        || lower.contains("rate_limit")
+        || lower.contains("rate limit exceeded")
+        || lower.contains("too many requests")
+    {
+        return Some("API 限流");
+    }
+    if lower.contains("context length")
+        || lower.contains("context_length")
+        || lower.contains("token limit")
+        || lower.contains("maximum context")
+        || lower.contains("too many tokens")
+    {
+        return Some("上下文或 token 超长");
+    }
+    if lower.contains("safety")
+        || lower.contains("refused")
+        || lower.contains("rejected")
+        || lower.contains("policy")
+    {
+        return Some("模型因安全策略拒绝继续");
+    }
+
+    None
+}
+
+/// Format an LLM API error for user display. When the error is a generic
+/// "Task failed — not continuing" type, tries to infer the specific cause from
+/// the error (API error.code, HTTP status, keywords). If a cause can be
+/// determined, shows it; otherwise falls back to a list of possible causes.
+pub fn format_user_facing_llm_error(raw: &str) -> String {
+    let sanitized = sanitize_api_error(raw);
+    if is_task_failed_not_continuing(&sanitized) {
+        if let Some(cause) = try_infer_specific_cause(raw) {
+            tracing::info!(cause = %cause, "Task failed 错误：已从 API 返回推断出具体原因");
+            format!(
+                "⚠️ 任务失败，模型未继续处理。\n\n确定原因：{}\n\n请重试或简化请求内容。",
+                cause
+            )
+        } else {
+            tracing::warn!(
+                raw_api_return = %sanitized,
+                "Task failed 错误：无法从 API 返回推断具体原因，原始内容已记录于 raw_api_return"
+            );
+            "⚠️ 任务失败，模型未继续处理。\n\n无法从 API 返回中解析具体原因，可能触发原因：\n• 内容审核未通过\n• 请求超时或上下文超长\n• API 限流或服务端限制\n• 模型主动终止（安全策略等）\n\n请稍后重试或简化请求内容。".to_string()
+        }
+    } else {
+        format!("ERR: {}", sanitized)
+    }
+}
+
+/// Minimal error marker for chat history when the error should not be
+/// passed to the LLM (e.g. "Task failed — not continuing"). Use this
+/// to close the turn without polluting context with the raw API message.
+pub fn minimal_error_marker_for_history(raw: &str) -> String {
+    if is_task_failed_not_continuing(raw) {
+        "ERR: 任务失败，未继续处理".to_string()
+    } else {
+        let sanitized = sanitize_api_error(raw);
+        crate::util::truncate_with_ellipsis(&format!("ERR: {}", sanitized), 500)
+    }
+}
+
 /// Sanitize API error text by scrubbing secrets and truncating length.
 pub fn sanitize_api_error(input: &str) -> String {
     let scrubbed = scrub_secret_patterns(input);
@@ -3150,6 +3272,43 @@ mod tests {
         let input = "simple upstream timeout";
         let result = sanitize_api_error(input);
         assert_eq!(result, input);
+    }
+
+    // ── Task failed / not continuing ─────────────────────────
+
+    #[test]
+    fn is_task_failed_detects_exact_phrase() {
+        assert!(is_task_failed_not_continuing(
+            "Task failed — not continuing this request"
+        ));
+        assert!(is_task_failed_not_continuing(
+            "task failed - not continue"
+        ));
+        assert!(!is_task_failed_not_continuing("Task completed successfully"));
+        assert!(!is_task_failed_not_continuing("rate limit exceeded"));
+    }
+
+    #[test]
+    fn format_user_facing_task_failed_returns_explanation() {
+        let input = "Task failed — not continuing this request";
+        let result = format_user_facing_llm_error(input);
+        assert!(result.contains("任务失败"));
+        assert!(result.contains("可能触发原因"));
+        assert!(!result.contains("not continuing this request"));
+    }
+
+    #[test]
+    fn format_user_facing_other_error_preserves_sanitized() {
+        let input = "rate limit exceeded";
+        let result = format_user_facing_llm_error(input);
+        assert_eq!(result, "ERR: rate limit exceeded");
+    }
+
+    #[test]
+    fn minimal_error_marker_for_task_failed_avoids_raw_in_history() {
+        let input = "Task failed — not continuing this request";
+        let result = minimal_error_marker_for_history(input);
+        assert_eq!(result, "ERR: 任务失败，未继续处理");
     }
 
     #[test]
