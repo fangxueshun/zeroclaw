@@ -62,6 +62,43 @@ fn print_no_command_help() -> Result<()> {
     Ok(())
 }
 
+/// Load ~/.zeroclaw/zeroclaw.env into process environment (KEY=VAL per line).
+/// Called before tracing init so RUST_LOG takes effect.
+/// Works for both direct run and service (Linux systemd / macOS launchd).
+fn load_zeroclaw_env() -> (PathBuf, usize) {
+    let env_path = std::env::var("ZEROCLAW_CONFIG_DIR")
+        .ok()
+        .map(|d| PathBuf::from(d).join("zeroclaw.env"))
+        .or_else(|| {
+            directories::UserDirs::new()
+                .map(|u| u.home_dir().join(".zeroclaw").join("zeroclaw.env"))
+        });
+    let path = env_path.unwrap_or_else(|| PathBuf::from(".zeroclaw/zeroclaw.env"));
+    let mut count = 0usize;
+    if path.exists() {
+        if let Ok(contents) = std::fs::read_to_string(&path) {
+            for line in contents.lines() {
+                let line = line.trim();
+                if line.is_empty() || line.starts_with('#') {
+                    continue;
+                }
+                if let Some((key, val)) = line.split_once('=') {
+                    let key = key.trim();
+                    let val = val.trim();
+                    if key.is_empty() {
+                        continue;
+                    }
+                    let expanded =
+                        shellexpand::full(val).unwrap_or_else(|_| std::borrow::Cow::Borrowed(val));
+                    std::env::set_var(key, expanded.as_ref());
+                    count += 1;
+                }
+            }
+        }
+    }
+    (path, count)
+}
+
 #[cfg(windows)]
 fn pause_after_no_command_help() {
     println!();
@@ -708,6 +745,19 @@ async fn main() -> Result<()> {
         let mut stdout = std::io::stdout().lock();
         write_shell_completion(*shell, &mut stdout)?;
         return Ok(());
+    }
+
+    // Load ~/.zeroclaw/zeroclaw.env (or ZEROCLAW_CONFIG_DIR/zeroclaw.env) before tracing init,
+    // so RUST_LOG, PATH, etc. take effect for both direct run and service (Linux/macOS).
+    let (zeroclaw_env_path, zeroclaw_env_count) = load_zeroclaw_env();
+    if zeroclaw_env_count > 0 {
+        println!(
+            "📋 zeroclaw.env: {} ({} vars loaded)",
+            zeroclaw_env_path.display(),
+            zeroclaw_env_count
+        );
+    } else {
+        println!("📋 zeroclaw.env: {} (not found or empty)", zeroclaw_env_path.display());
     }
 
     // Initialize logging - respects RUST_LOG env var, defaults to INFO
