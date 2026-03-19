@@ -851,6 +851,7 @@ async fn main() -> Result<()> {
 
     // All other commands need config loaded first
     let mut config = Config::load_or_init().await?;
+    println!("📋 Config: {}", config.config_path.display());
     config.apply_env_overrides();
     observability::runtime_trace::init_from_config(&config.observability, &config.workspace_dir);
     if config.security.otp.enabled {

@@ -579,6 +579,7 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
     }
 
     println!("🦀 ZeroClaw Gateway listening on http://{display_addr}");
+    println!("   Config:   {}", config.config_path.display());
     if let Some(ref url) = tunnel_url {
         println!("  🌐 Public URL: {url}");
     }
