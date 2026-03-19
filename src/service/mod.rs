@@ -431,8 +431,8 @@ fn install_macos(config: &Config) -> Result<()> {
 "#,
         label = SERVICE_LABEL,
         exe = xml_escape(&exe.display().to_string()),
-        home_str,
-        zeroclaw_dir_str,
+        home_str = &home_str,
+        zeroclaw_dir_str = &zeroclaw_dir_str,
         stdout = xml_escape(&stdout.display().to_string()),
         stderr = xml_escape(&stderr.display().to_string())
     );
