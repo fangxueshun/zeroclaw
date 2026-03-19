@@ -381,15 +381,23 @@ fn install_macos(config: &Config) -> Result<()> {
     }
 
     let exe = std::env::current_exe().context("Failed to resolve current executable")?;
-    let logs_dir = config
+    let zeroclaw_dir = config
         .config_path
         .parent()
-        .map_or_else(|| PathBuf::from("."), PathBuf::from)
-        .join("logs");
+        .map_or_else(|| PathBuf::from("."), PathBuf::from);
+    let home_dir = zeroclaw_dir
+        .parent()
+        .map_or_else(|| PathBuf::from("/tmp"), std::path::PathBuf::from);
+    let logs_dir = zeroclaw_dir.join("logs");
     fs::create_dir_all(&logs_dir)?;
 
     let stdout = logs_dir.join("daemon.stdout.log");
     let stderr = logs_dir.join("daemon.stderr.log");
+
+    // Set HOME and ZEROCLAW_CONFIG_DIR so the daemon can find ~/.zeroclaw/zeroclaw.env
+    // when launchd spawns it (launchd often omits HOME for background agents).
+    let home_str = xml_escape(&home_dir.display().to_string());
+    let zeroclaw_dir_str = xml_escape(&zeroclaw_dir.display().to_string());
 
     let plist = format!(
         r#"<?xml version=\"1.0\" encoding=\"UTF-8\"?>
@@ -407,6 +415,13 @@ fn install_macos(config: &Config) -> Result<()> {
   <true/>
   <key>KeepAlive</key>
   <true/>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>{home_str}</string>
+    <key>ZEROCLAW_CONFIG_DIR</key>
+    <string>{zeroclaw_dir_str}</string>
+  </dict>
   <key>StandardOutPath</key>
   <string>{stdout}</string>
   <key>StandardErrorPath</key>
@@ -416,6 +431,8 @@ fn install_macos(config: &Config) -> Result<()> {
 "#,
         label = SERVICE_LABEL,
         exe = xml_escape(&exe.display().to_string()),
+        home_str,
+        zeroclaw_dir_str,
         stdout = xml_escape(&stdout.display().to_string()),
         stderr = xml_escape(&stderr.display().to_string())
     );
@@ -423,6 +440,11 @@ fn install_macos(config: &Config) -> Result<()> {
     fs::write(&file, plist)?;
     println!("✅ Installed launchd service: {}", file.display());
     println!("   Start with: zeroclaw service start");
+    println!(
+        "   zeroclaw.env: {}/zeroclaw.env (daemon loads it; logs: {}/logs/)",
+        zeroclaw_dir.display(),
+        zeroclaw_dir.display()
+    );
     Ok(())
 }
 
